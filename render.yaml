@@ -1,0 +1,9 @@
+services:
+  - type: worker
+    name: mj-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
