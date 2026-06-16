@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { AudioPlayerStatus } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 const MusicPlayer = require('./src/player');
@@ -68,7 +69,7 @@ client.on('messageCreate', async (message) => {
 
         guildQueue.textChannel = message.channel;
         const status = guildQueue.player.state.status;
-        const isIdle = status === 'idle';
+        const isIdle = status === AudioPlayerStatus.Idle;
 
         const rep = await message.reply('Searching...');
 

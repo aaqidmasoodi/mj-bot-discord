@@ -3,7 +3,6 @@ const {
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
-  StreamType,
   joinVoiceChannel,
   VoiceConnectionStatus,
   entersState,
@@ -35,7 +34,7 @@ function fetchJSON(url) {
 }
 
 async function searchArchive(query, limit = 5) {
-  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}+AND+mediatype:audio&fl[]=identifier,title,creator&sort[]=downloads+desc&rows=${limit}&page=1&output=json`;
+  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl[]=identifier,title,creator&and[]=mediatype:audio&sort[]=downloads+desc&rows=${limit}&page=1&output=json`;
   const data = await fetchJSON(url);
   return data?.response?.docs || [];
 }
@@ -54,6 +53,23 @@ function findBestAudioFile(metadata) {
   return metadata.files.find(f =>
     f.source === 'original' && f.format && (f.format.includes('MP3') || f.format.includes('OGG') || f.format.includes('FLAC') || f.format.includes('PCM'))
   ) || null;
+}
+
+function streamAudio(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      if (res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`));
+        res.resume();
+        return;
+      }
+      if (res.statusCode >= 300 && res.headers.location) {
+        resolve(streamAudio(res.headers.location));
+        return;
+      }
+      resolve(res);
+    }).on('error', reject);
+  });
 }
 
 class GuildQueue {
@@ -105,8 +121,8 @@ class GuildQueue {
     this.nowPlaying = song;
 
     try {
-      const resource = createAudioResource(song.url, {
-        inputType: StreamType.Arbitrary,
+      const stream = await streamAudio(song.url);
+      const resource = createAudioResource(stream, {
         inlineVolume: true,
       });
       resource.volume.setVolume(this.volume);
