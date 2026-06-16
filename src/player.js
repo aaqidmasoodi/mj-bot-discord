@@ -35,7 +35,7 @@ function fetchJSON(url) {
 }
 
 async function searchArchive(query, limit = 5) {
-  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl[]=identifier,title,creator&sort[]=downloads+desc&rows=${limit}&page=1&output=json`;
+  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}+AND+mediatype:audio&fl[]=identifier,title,creator&sort[]=downloads+desc&rows=${limit}&page=1&output=json`;
   const data = await fetchJSON(url);
   return data?.response?.docs || [];
 }
@@ -46,13 +46,13 @@ async function getArchiveItem(identifier) {
 
 function findBestAudioFile(metadata) {
   if (!metadata?.files) return null;
-  const formats = ['MP3', '128Kbps MP3', 'VBR MP3', 'OGG', '64Kbps MP3'];
+  const formats = ['MP3', '128Kbps MP3', 'VBR MP3', '192Kbps MP3', '256Kbps MP3', '320Kbps MP3', 'OGG', '96Kbps MP3', '64Kbps MP3'];
   for (const fmt of formats) {
     const file = metadata.files.find(f => f.format === fmt);
     if (file) return file;
   }
   return metadata.files.find(f =>
-    f.source === 'original' && (f.format?.includes('MP3') || f.format?.includes('OGG') || f.format?.includes('FLAC'))
+    f.source === 'original' && f.format && (f.format.includes('MP3') || f.format.includes('OGG') || f.format.includes('FLAC') || f.format.includes('PCM'))
   ) || null;
 }
 
