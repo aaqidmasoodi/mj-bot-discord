@@ -4,6 +4,7 @@ const {
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
+  NoSubscriberBehavior,
   joinVoiceChannel,
   VoiceConnectionStatus,
   entersState,
@@ -15,20 +16,31 @@ class GuildQueue {
   constructor() {
     this.queue = [];
     this.connection = null;
-    this.player = createAudioPlayer();
+    this.player = createAudioPlayer({ noSubscriber: NoSubscriberBehavior.Stop });
     this.loopMode = 'none';
     this.volume = 1;
     this.nowPlaying = null;
     this.textChannel = null;
     this.currentProcess = null;
+    this.statusMessage = null;
 
     this.player.on(AudioPlayerStatus.Idle, () => {
+      console.log('[AudioPlayer] status -> Idle');
       this.playNext();
     });
 
+    this.player.on(AudioPlayerStatus.AutoPaused, () => {
+      console.log('[AudioPlayer] status -> AutoPaused, stopping');
+      this.player.stop();
+    });
+
     this.player.on('error', (error) => {
-      console.error('Player error:', error.message);
+      console.error('[AudioPlayer] error:', error.message);
       this.playNext();
+    });
+
+    this.player.on('stateChange', (oldState, newState) => {
+      console.log('[AudioPlayer] state:', oldState.status, '->', newState.status);
     });
   }
 
@@ -39,13 +51,26 @@ class GuildQueue {
     }
   }
 
+  async updateStatusMessage(content) {
+    if (!this.textChannel) return;
+    if (this.statusMessage) {
+      try {
+        this.statusMessage = await this.statusMessage.edit(content);
+      } catch {
+        this.statusMessage = await this.textChannel.send(content);
+      }
+    } else {
+      this.statusMessage = await this.textChannel.send(content);
+    }
+  }
+
   async playNext() {
     this.destroyProcess();
+    console.log('[playNext] called, queue:', this.queue.length, 'nowPlaying:', !!this.nowPlaying, 'loop:', this.loopMode);
 
     if (this.queue.length === 0 && !this.nowPlaying) {
-      if (this.textChannel) {
-        this.textChannel.send('Queue finished.');
-      }
+      console.log('[playNext] nothing to play');
+      await this.updateStatusMessage('Queue finished.');
       return;
     }
 
@@ -53,12 +78,12 @@ class GuildQueue {
 
     if (this.loopMode === 'song' && this.nowPlaying) {
       song = this.nowPlaying;
+      console.log('[playNext] looping current song');
     } else {
       if (this.queue.length === 0) {
+        console.log('[playNext] queue empty, stopping');
         this.nowPlaying = null;
-        if (this.textChannel) {
-          this.textChannel.send('Queue finished.');
-        }
+        await this.updateStatusMessage('Queue finished.');
         return;
       }
       song = this.queue.shift();
@@ -68,8 +93,10 @@ class GuildQueue {
     }
 
     this.nowPlaying = song;
+    console.log('[playNext] playing:', song.title, 'url:', song.url);
 
     try {
+      console.log('[playNext] spawning yt-dlp...');
       const proc = spawn(YT_DLP, [
         '-f', 'bestaudio',
         '-o', '-',
@@ -79,31 +106,48 @@ class GuildQueue {
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
       this.currentProcess = proc;
+      console.log('[playNext] yt-dlp spawned, pid:', proc.pid);
 
-      proc.stderr.on('data', () => {});
+      let stderrBuf = '';
+      proc.stderr.on('data', (chunk) => {
+        stderrBuf += chunk.toString();
+        console.log('[yt-dlp stderr]', chunk.toString().trim());
+      });
 
       proc.on('error', (err) => {
-        console.error('yt-dlp error:', err.message);
+        console.error('[playNext] yt-dlp process error:', err.message);
         this.playNext();
       });
 
-      proc.on('exit', (code) => {
-        if (code !== 0 && !proc.killed) {
-          console.error('yt-dlp exited with code', code);
-        }
+      proc.on('exit', (code, signal) => {
+        console.log('[playNext] yt-dlp exited code:', code, 'signal:', signal, 'killed:', proc.killed, 'stderr:', stderrBuf.slice(-200));
       });
 
+      let audioBytes = 0;
+      proc.stdout.on('data', (chunk) => {
+        audioBytes += chunk.length;
+      });
+      proc.stdout.on('end', () => {
+        console.log('[playNext] yt-dlp stdout ended, total bytes:', audioBytes);
+      });
+      proc.stdout.on('error', (err) => {
+        console.error('[playNext] yt-dlp stdout error:', err.message);
+      });
+
+      console.log('[playNext] creating AudioResource...');
       const resource = createAudioResource(proc.stdout, {
         inlineVolume: true,
       });
+      console.log('[playNext] AudioResource created, volume:', !!resource.volume, 'playStream readable:', resource.playStream.readable);
       resource.volume.setVolume(this.volume);
+      console.log('[playNext] calling player.play()...');
       this.player.play(resource);
+      console.log('[playNext] player state:', this.player.state.status);
 
-      if (this.textChannel) {
-        this.textChannel.send(`Now playing: **${song.title}**`);
-      }
+      await this.updateStatusMessage(`Now playing: **${song.title}**`);
+      console.log('[playNext] Now playing message sent');
     } catch (err) {
-      console.error('Stream error:', err.message);
+      console.error('[playNext] Stream error:', err.message, err.stack);
       this.playNext();
     }
   }
@@ -150,11 +194,13 @@ class MusicPlayer {
   async play(guildId, query) {
     const guildQueue = this.getQueue(guildId);
     const trimmed = query.trim();
+    console.log('[play] query:', trimmed);
 
     let url, title, duration;
     const ytMatch = trimmed.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([\w-]{11})/);
     if (ytMatch) {
       const id = ytMatch[1];
+      console.log('[play] direct YouTube URL, id:', id);
       const info = await youtubedl(`https://youtube.com/watch?v=${id}`, {
         dumpJson: true,
         noWarnings: true,
@@ -162,7 +208,9 @@ class MusicPlayer {
       url = info.webpage_url || trimmed;
       title = info.title;
       duration = info.duration_string || '';
+      console.log('[play] got info:', title);
     } else {
+      console.log('[play] searching YouTube...');
       const result = await youtubedl(`ytsearch1:${trimmed}`, {
         flatPlaylist: true,
         dumpJson: true,
@@ -172,11 +220,14 @@ class MusicPlayer {
       title = result.title;
       duration = result.duration_string || '';
       if (!url && result.id) url = `https://youtube.com/watch?v=${result.id}`;
+      console.log('[play] search result:', title, url);
     }
 
     const song = { title, url, duration };
+    console.log('[play] queued song, player idle?', guildQueue.player.state.status === AudioPlayerStatus.Idle);
     guildQueue.queue.push(song);
     if (guildQueue.player.state.status === AudioPlayerStatus.Idle) {
+      console.log('[play] calling playNext()');
       await guildQueue.playNext();
     }
     return song;

@@ -70,14 +70,15 @@ client.on('messageCreate', async (message) => {
         const isIdle = status === AudioPlayerStatus.Idle;
 
         const rep = await message.reply('Searching...');
+        guildQueue.statusMessage = rep;
 
         const result = await player.play(message.guild.id, args.join(' '));
 
         if (result.type === 'playlist') {
           await rep.edit(`Added **${result.count}** songs from playlist: **${result.name}**`);
-        } else {
-          const prefix = isIdle ? 'Now playing' : 'Added to queue';
-          await rep.edit(`${prefix}: **${result.title}**`);
+        } else if (!isIdle) {
+          // When idle, playNext() will update the statusMessage to "Now playing: ..."
+          await rep.edit(`Added to queue: **${result.title}**`);
         }
         break;
       }
