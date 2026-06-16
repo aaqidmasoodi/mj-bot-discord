@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { AudioPlayerStatus } = require('@discordjs/voice');
 const MusicPlayer = require('./src/player');
 
 const ffmpeg = require('ffmpeg-static');
