@@ -1,4 +1,5 @@
-const https = require('https');
+const { spawn } = require('child_process');
+const youtubedl = require('youtube-dl-exec');
 const {
   createAudioPlayer,
   createAudioResource,
@@ -8,69 +9,7 @@ const {
   entersState,
 } = require('@discordjs/voice');
 
-function fetchJSON(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MJBot/1.0)' },
-      timeout: 15000,
-    }, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`HTTP ${res.statusCode} from ${url}`));
-        res.resume();
-        return;
-      }
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('error', reject);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(e); }
-      });
-    }).on('error', reject).on('timeout', function () {
-      this.destroy();
-      reject(new Error('Request timeout'));
-    });
-  });
-}
-
-async function searchArchive(query, limit = 5) {
-  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl[]=identifier,title,creator&and[]=mediatype:audio&sort[]=downloads+desc&rows=${limit}&page=1&output=json`;
-  const data = await fetchJSON(url);
-  return data?.response?.docs || [];
-}
-
-async function getArchiveItem(identifier) {
-  return await fetchJSON(`https://archive.org/metadata/${identifier}`);
-}
-
-function findBestAudioFile(metadata) {
-  if (!metadata?.files) return null;
-  const formats = ['MP3', '128Kbps MP3', 'VBR MP3', '192Kbps MP3', '256Kbps MP3', '320Kbps MP3', 'OGG', '96Kbps MP3', '64Kbps MP3'];
-  for (const fmt of formats) {
-    const file = metadata.files.find(f => f.format === fmt);
-    if (file) return file;
-  }
-  return metadata.files.find(f =>
-    f.source === 'original' && f.format && (f.format.includes('MP3') || f.format.includes('OGG') || f.format.includes('FLAC') || f.format.includes('PCM'))
-  ) || null;
-}
-
-function streamAudio(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
-      if (res.statusCode >= 400) {
-        reject(new Error(`HTTP ${res.statusCode}`));
-        res.resume();
-        return;
-      }
-      if (res.statusCode >= 300 && res.headers.location) {
-        resolve(streamAudio(res.headers.location));
-        return;
-      }
-      resolve(res);
-    }).on('error', reject);
-  });
-}
+const YT_DLP = youtubedl.constants.YOUTUBE_DL_PATH;
 
 class GuildQueue {
   constructor() {
@@ -81,6 +20,7 @@ class GuildQueue {
     this.volume = 1;
     this.nowPlaying = null;
     this.textChannel = null;
+    this.currentProcess = null;
 
     this.player.on(AudioPlayerStatus.Idle, () => {
       this.playNext();
@@ -92,7 +32,16 @@ class GuildQueue {
     });
   }
 
+  destroyProcess() {
+    if (this.currentProcess) {
+      try { this.currentProcess.kill(); } catch {}
+      this.currentProcess = null;
+    }
+  }
+
   async playNext() {
+    this.destroyProcess();
+
     if (this.queue.length === 0 && !this.nowPlaying) {
       if (this.textChannel) {
         this.textChannel.send('Queue finished.');
@@ -121,8 +70,30 @@ class GuildQueue {
     this.nowPlaying = song;
 
     try {
-      const stream = await streamAudio(song.url);
-      const resource = createAudioResource(stream, {
+      const proc = spawn(YT_DLP, [
+        '-f', 'bestaudio',
+        '-o', '-',
+        '--no-warnings',
+        '--no-playlist',
+        song.url,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      this.currentProcess = proc;
+
+      proc.stderr.on('data', () => {});
+
+      proc.on('error', (err) => {
+        console.error('yt-dlp error:', err.message);
+        this.playNext();
+      });
+
+      proc.on('exit', (code) => {
+        if (code !== 0 && !proc.killed) {
+          console.error('yt-dlp exited with code', code);
+        }
+      });
+
+      const resource = createAudioResource(proc.stdout, {
         inlineVolume: true,
       });
       resource.volume.setVolume(this.volume);
@@ -178,51 +149,32 @@ class MusicPlayer {
 
   async play(guildId, query) {
     const guildQueue = this.getQueue(guildId);
+    const trimmed = query.trim();
 
-    const match = query.match(/archive\.org\/(?:details|download)\/([^/\s?]+)/);
-    let identifier;
-    if (match) {
-      identifier = match[1];
+    let url, title, duration;
+    const ytMatch = trimmed.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([\w-]{11})/);
+    if (ytMatch) {
+      const id = ytMatch[1];
+      const info = await youtubedl(`https://youtube.com/watch?v=${id}`, {
+        dumpJson: true,
+        noWarnings: true,
+      });
+      url = info.webpage_url || trimmed;
+      title = info.title;
+      duration = info.duration_string || '';
     } else {
-      const results = await searchArchive(query);
-      if (results.length === 0) throw new Error('No results found on Internet Archive');
-
-      for (const result of results) {
-        try {
-          const metadata = await getArchiveItem(result.identifier);
-          const audioFile = findBestAudioFile(metadata);
-          if (!audioFile) continue;
-
-          const parts = audioFile.name.split('/').map(encodeURIComponent).join('/');
-          const song = {
-            title: result.title,
-            url: `https://archive.org/download/${result.identifier}/${parts}`,
-            identifier: result.identifier,
-            duration: audioFile.length || 'Unknown',
-          };
-          guildQueue.queue.push(song);
-          if (guildQueue.player.state.status === AudioPlayerStatus.Idle) {
-            await guildQueue.playNext();
-          }
-          return song;
-        } catch (e) {
-          console.error(`Failed to load ${result.identifier}:`, e.message);
-        }
-      }
-      throw new Error('No playable audio found in search results');
+      const result = await youtubedl(`ytsearch1:${trimmed}`, {
+        flatPlaylist: true,
+        dumpJson: true,
+        noWarnings: true,
+      });
+      url = result.webpage_url;
+      title = result.title;
+      duration = result.duration_string || '';
+      if (!url && result.id) url = `https://youtube.com/watch?v=${result.id}`;
     }
 
-    const metadata = await getArchiveItem(identifier);
-    const audioFile = findBestAudioFile(metadata);
-    if (!audioFile) throw new Error('No audio files in that item');
-
-    const parts = audioFile.name.split('/').map(encodeURIComponent).join('/');
-    const song = {
-      title: metadata?.metadata?.title || identifier,
-      url: `https://archive.org/download/${identifier}/${parts}`,
-      identifier,
-      duration: audioFile.length || 'Unknown',
-    };
+    const song = { title, url, duration };
     guildQueue.queue.push(song);
     if (guildQueue.player.state.status === AudioPlayerStatus.Idle) {
       await guildQueue.playNext();
@@ -233,6 +185,7 @@ class MusicPlayer {
   skip(guildId) {
     const guildQueue = this.getQueue(guildId);
     if (guildQueue.player.state.status !== AudioPlayerStatus.Idle) {
+      guildQueue.destroyProcess();
       guildQueue.player.stop();
       return true;
     }
@@ -241,6 +194,7 @@ class MusicPlayer {
 
   stop(guildId) {
     const guildQueue = this.getQueue(guildId);
+    guildQueue.destroyProcess();
     guildQueue.queue = [];
     guildQueue.player.stop(true);
     guildQueue.nowPlaying = null;
