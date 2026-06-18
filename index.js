@@ -5,6 +5,9 @@ const {
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
+  VoiceConnectionStatus,
+  entersState,
+  NoSubscriberBehavior,
 } = require('@discordjs/voice');
 const path = require('path');
 
@@ -81,7 +84,9 @@ client.on('messageCreate', async (message) => {
           adapterCreator: message.guild.voiceAdapterCreator,
         });
 
-        const player = createAudioPlayer();
+        const player = createAudioPlayer({
+          behaviors: { noSubscriber: NoSubscriberBehavior.Play },
+        });
         connection.subscribe(player);
 
         player.on(AudioPlayerStatus.Idle, () => {
@@ -94,7 +99,10 @@ client.on('messageCreate', async (message) => {
         });
 
         sessions.set(message.guild.id, { connection, player });
-        console.log('[play] starting radio');
+
+        console.log('[play] waiting for connection to be ready...');
+        await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+        console.log('[play] connection ready, starting radio');
         playRadio(player);
         await message.reply('Now playing.');
         break;
