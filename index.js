@@ -36,21 +36,31 @@ client.once('clientReady', () => {
 });
 
 client.on('messageCreate', async (message) => {
-  if (!message.content.startsWith(PREFIX) || message.author.bot) return;
+  console.log(`[msg] author=${message.author.tag} bot=${message.author.bot} content="${message.content}"`);
+
+  if (message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) {
+    console.log('[msg] ignored: no prefix');
+    return;
+  }
 
   const command = message.content.slice(PREFIX.length).trim().split(/ +/)[0].toLowerCase();
+  console.log(`[cmd] command="${command}"`);
 
   try {
     switch (command) {
       case 'play': {
         const voiceChannel = message.member?.voice?.channel;
+        console.log(`[play] voiceChannel=${voiceChannel?.name ?? 'none'}`);
         if (!voiceChannel) return message.reply('Join a voice channel first.');
 
         const perms = voiceChannel.permissionsFor(client.user);
+        console.log(`[play] connect=${perms.has('Connect')} speak=${perms.has('Speak')}`);
         if (!perms.has('Connect') || !perms.has('Speak'))
           return message.reply('I need Connect and Speak permissions.');
 
         const existing = sessions.get(message.guild.id);
+        console.log(`[play] existing session=${!!existing} status=${existing?.player.state.status ?? 'none'}`);
 
         if (existing) {
           if (existing.player.state.status === AudioPlayerStatus.Paused) {
@@ -62,6 +72,7 @@ client.on('messageCreate', async (message) => {
           }
         }
 
+        console.log(`[play] joining channel ${voiceChannel.id}`);
         const connection = joinVoiceChannel({
           channelId: voiceChannel.id,
           guildId: message.guild.id,
@@ -71,10 +82,17 @@ client.on('messageCreate', async (message) => {
         const player = createAudioPlayer();
         connection.subscribe(player);
 
-        player.on(AudioPlayerStatus.Idle, () => playRadio(player));
-        player.on('error', (err) => console.error('Player error:', err.message));
+        player.on(AudioPlayerStatus.Idle, () => {
+          console.log('[player] idle — looping');
+          playRadio(player);
+        });
+        player.on('error', (err) => console.error('[player] error:', err.message));
+        player.on('stateChange', (oldState, newState) => {
+          console.log(`[player] ${oldState.status} -> ${newState.status}`);
+        });
 
         sessions.set(message.guild.id, { connection, player });
+        console.log('[play] starting radio');
         playRadio(player);
         await message.reply('Now playing.');
         break;
