@@ -32,6 +32,8 @@ function playRadio(player) {
 
 client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}`);
+  const fs = require('fs');
+  console.log(`[startup] radio file exists: ${fs.existsSync(RADIO_FILE)} | path: ${RADIO_FILE}`);
   client.user.setPresence({ activities: [{ name: '!play', type: 2 }], status: 'online' });
 });
 
